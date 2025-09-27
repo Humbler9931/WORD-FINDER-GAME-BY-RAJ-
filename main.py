@@ -262,10 +262,10 @@ def get_start_keyboard():
     keyboard = [
         [InlineKeyboardButton("❓ Help & Info", callback_data="show_help_menu")],
         [
-            InlineKeyboardButton("💬 Report Bugs", url="https://t.me/astrabotz_chat"), 
-            InlineKeyboardButton("📢 Updates Channel", url="https://t.me/astrabotz") 
+            InlineKeyboardButton("💬 Report Bugs", url="https://t.me/Onlymrabhi01"), 
+            InlineKeyboardButton("📢 Updates Channel", url="https://t.me/narzob") 
         ],
-        [InlineKeyboardButton("➕ Add Bot to Group", url="https://t.me/WordRushBot?startgroup=true")]
+        [InlineKeyboardButton("➕ Add Bot to Group", url="https://t.me/narzowordseekbot?startgroup=true")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
