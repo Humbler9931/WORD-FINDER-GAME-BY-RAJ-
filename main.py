@@ -339,7 +339,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "Simple & Intresting Words\n"
         "Guess bot, Use **/new** to start game.\n"
         "Play & Report: **@narzoxbot**\n"
-        "Updates,: **@astrabotz**",
+        "Updates,: **@narzob**",
         reply_markup=get_start_keyboard(),
         parse_mode='Markdown'
     )
