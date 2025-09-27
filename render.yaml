@@ -1,1 +1,14 @@
-
+services:
+  - type: web
+    name: telegram-bot
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python main.py"
+    envVars:
+      - key: MONGO_DB_NAME
+        value: "APNA_DB_NAME"
+      - key: MONGO_URL
+        value: "APNA_MONGO_URL"
+      - key: BOT_TOKEN
+        value: "APNA_BOT_TOKEN"
