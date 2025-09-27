@@ -259,7 +259,7 @@ def get_start_keyboard():
     keyboard = [
         [InlineKeyboardButton("Help Menu", callback_data="show_help_menu")],
         [
-            InlineKeyboardButton("Play & Report", url="https://t.me/teamrajweb"), 
+            InlineKeyboardButton("Report", url="https://t.me/Onlymrabhi01"), 
             InlineKeyboardButton("Updates", url="https://t.me/narzob") 
         ],
         [InlineKeyboardButton("Add me to your chat", url="https://t.me/narzowordseekbot?startgroup=true")]
