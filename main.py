@@ -303,7 +303,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         mongo_manager.add_chat(update.effective_chat.id, update.effective_chat.type.name, update.effective_message.date.timestamp())
     
     await update.message.reply_text(
-        "👋 *Hello! I'm* **WordRush Bot** 🤖\n"
+        "👋 *Hello! I'm* **@narzowordseekbot** 🤖\n"
         "-------------------------------------\n"
         "The **Ultimate Word Challenge** on Telegram!\n\n"
         "📜 **Goal:** Guess the secret word using hints (🟩/🟨/🟥).\n"
