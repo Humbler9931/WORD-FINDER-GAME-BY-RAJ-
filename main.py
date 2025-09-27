@@ -307,7 +307,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     
     # Stylish Start Message
     await update.message.reply_text(
-        "👋 *Hello! I'm* **WordRush Bot** 🤖\n"
+        "👋 *Hello! I'm* **@narzowordseekbot** 🤖\n"
         "-------------------------------------\n"
         "The **Ultimate Word Challenge** on Telegram!\n\n"
         "📜 **Goal:** *Guess the secret word using hints (🟩/🟨/🟥).*\n"
@@ -410,6 +410,29 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     await update.message.reply_text(message, parse_mode='Markdown')
 
+async def difficulty_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Shows available difficulty levels and their settings."""
+    chat_id = update.effective_chat.id
+
+    if not await is_group_admin(update, context):
+        await update.message.reply_text("🚨 *Admin Check Failed*. You must be an **Admin** to view or change settings.", parse_mode='Markdown')
+        return
+
+    message = "**⚙️ Word Rush Difficulty Settings**\n"
+    message += "-------------------------------------\n"
+    
+    for level, config in DIFFICULTY_CONFIG.items():
+        message += f"**{level.capitalize()}**:\n"
+        message += f"   - Word Length: **{config['length']}** letters\n"
+        message += f"   - Max Guesses: **{config['max_guesses']}**\n"
+        message += f"   - Base Points: **{config['base_points']}**\n"
+        message += f"   - Example: `{config['example']}`\n\n"
+
+    message += "👉 *Use* `/new <level>` *to start a game with a specific difficulty.* (e.g., `/new hard`)"
+
+    await update.message.reply_text(message, parse_mode='Markdown')
+
+
 # --- Broadcast Command (Unchanged, Admin only) ---
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -497,7 +520,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             "• **/status** → *Show current game status and history* (New Feature!).\n"
             "• **/leaderboard** → *Show global rankings*.\n"
             "• **/end** → *End current game* (Admin Only / DM).\n"
-            "• **/difficulty** [level] → *Change settings* (Admin Only / DM).\n"
+            "• **/difficulty** → *Show difficulty settings* (Admin Only / DM).\n"
         )
         await query.edit_message_text(commands_list, reply_markup=get_help_menu_keyboard(), parse_mode='Markdown')
         
@@ -632,8 +655,8 @@ def main():
     application.add_handler(CommandHandler("new", new_game_command))
     application.add_handler(CommandHandler("end", end_game_command))
     application.add_handler(CommandHandler("leaderboard", leaderboard_command))
-    application.add_handler(CommandHandler("difficulty", difficulty_command))
-    application.add_handler(CommandHandler("status", status_command)) # New feature
+    application.add_handler(CommandHandler("difficulty", difficulty_command)) # FIXED: Now points to the defined function
+    application.add_handler(CommandHandler("status", status_command)) 
     
     if ADMIN_USER_ID != 0 and mongo_manager is not None:
         application.add_handler(CommandHandler("broadcast", broadcast_command))
@@ -644,8 +667,6 @@ def main():
     application.add_handler(CallbackQueryHandler(callback_handler))
     
     # Message handler for guesses:
-    # filters.TEXT & ~filters.COMMAND: Only text messages, not commands.
-    # filters.Regex: Only accepts 1 to 8 English letters, preventing spam and non-guess messages.
     application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND & filters.Regex(r'^[a-zA-Z]{1,8}$'), 
