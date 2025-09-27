@@ -259,10 +259,10 @@ def get_start_keyboard():
     keyboard = [
         [InlineKeyboardButton("Help Menu", callback_data="show_help_menu")],
         [
-            InlineKeyboardButton("Play & Report", url="https://t.me/astrabotz_chat"), 
-            InlineKeyboardButton("Updates", url="https://t.me/astrabotz") 
+            InlineKeyboardButton("Play & Report", url="https://t.me/teamrajweb"), 
+            InlineKeyboardButton("Updates", url="https://t.me/narzob") 
         ],
-        [InlineKeyboardButton("Add me to your chat", url="https://t.me/WordRushBot?startgroup=true")]
+        [InlineKeyboardButton("Add me to your chat", url="https://t.me/narzowordseekbot?startgroup=true")]
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -309,8 +309,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "**WordRush**\n"
         "Simple & Intresting Words\n"
         "Guess bot, Use **/new** to start game.\n"
-        "Play & Report: **@astrabotz_chat**\n"
-        "Updates,: **@astrabotz**",
+        "Play & Report: **@narzob**\n"
+        "Updates,: **@narzoxbot**",
         reply_markup=get_start_keyboard(),
         parse_mode='Markdown'
     )
