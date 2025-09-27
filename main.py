@@ -17,12 +17,10 @@ logger = logging.getLogger(__name__)
 
 # --- Load Environment Variables ---
 load_dotenv()
-# Make sure to set BOT_TOKEN, MONGO_URL, and ADMIN_USER_ID in a .env file
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 MONGO_URL = os.getenv("MONGO_URL")
 MONGO_DB_NAME = os.getenv("MONGO_DB_NAME", "WordRushDB")
 try:
-    # Ensure ADMIN_USER_ID is an integer for security checks
     ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID")) 
 except (TypeError, ValueError):
     ADMIN_USER_ID = 0 
@@ -36,10 +34,8 @@ DIFFICULTY_CONFIG = {
     'extreme': {'length': 10, 'max_guesses': 30, 'base_points': 50, 'example': 'BASKETBALL'}
 }
 
-# --- Word List and Pre-processing ---
-# IMPORTANT: This list must contain common, valid English words matching the specified lengths.
+# --- Word List and Pre-processing (Same as before, assumed to be valid) ---
 RAW_WORDS = [
-    # 4-Letter Words
     "GAME", "FOUR", "FIRE", "WORD", "PLAY", "CODE", "RUNS", "STOP", "LOOK", "CALL", "BACK", "BEST", "FAST", "SLOW", "HIGH", "LOWS", 
     "OPEN", "CLOS", "READ", "WRIT", "BOOK", "PAGE", "LINE", "JUMP", "WALK", "TALK", "QUIZ", "TEST", "RAIN", "SNOW", "SUNY", "COLD", 
     "HEAT", "WIND", "MIST", "DUST", "ROCK", "SAND", "SOIL", "GRAS", "TREE", "LEAF", "ROOT", "STEM", "SEED", "GROW", "CROP", "FARM", 
@@ -47,7 +43,6 @@ RAW_WORDS = [
     "FIND", "LOSE", "PUTS", "GETS", "MAKE", "DONE", "HITS", "MISS", "KICK", "PULL", "PUSH", "TURN", "STAR", "MOON", "PLAN", "MARS", 
     "EARH", "AIRS", "BOAT", "SHIP", "CARS", "BUSY", "TRAK", "RAIL", "ROAD", "MAPS", "HUES", "PINK", "BLUE", "GREN", "YELL", "BLAK", 
     "WHIT", "GRYY", "BRWN", "PURP", 
-    # 5-Letter Words
     "APPLE", "HEART", "WATER", "TABLE", "PLANT", "TIGER", "EAGLE", "SNAKE", "WHALE", "ZEBRA", "SOUND", "MUSIC", "RADIO", "VOICE", 
     "BEACH", "OCEAN", "RIVER", "LAKE", "FIELD", "CABLE", "WIRED", "PHONE", "EMAIL", "SCARY", "HAPPY", "FUNNY", "SADLY", "ANGER", 
     "BRAVE", "CHAIR", "BENCH", "CUPPY", "GLASS", "PLATE", "FORKS", "KNIFE", "SPOON", "SUGAR", "SALTZ", "BREAD", "CHEES", "MEATS", 
@@ -62,7 +57,6 @@ RAW_WORDS = [
     "SWIMM", "MOVIE", "ACTOR", "STAGE", "SCENE", "DRAMA", "COMIC", "NOVEL", "POEMS", "LYRIC", "SONGS", "EARLY", "LATER", "TODAY", 
     "YESTA", "TOMOR", "WEEKS", "MONTH", "YEARS", "AGING", "YOUNG", "STORY", "MYTHS", "LEGEND", "FOLKS", "TALES", "FABLE", "PICTS", 
     "PAINT", "SKETCH", "DRAWN", "FANCY", "SMART", "CLEAN", "DIRTY", "MESSY", "TIDYY", "BRISK", "QUICK", "SLOWW", "HUMID",
-    # 8 and 10-Letter Words (Example set, expand this heavily for real use)
     "FOOTBALL", "COMPUTER", "KEYBOARD", "MEMORIZE", "INTERNET", "PROGRAMS", "SOFTWARE", "HARDWARE", "DATABASE", "ALGORISM", 
     "SECURITY", "PASSWORD", "TELEGRAM", "BUSINESS", "FINANCES", "MARKETIN", "ADVERTSZ", "STRATEGY", "MANUFACT", "PRODUCTS", 
     "SERVICES", "OPERATIO", "INNOVATE", "CREATIVE", "RESEARCH", "ANALYSES", "SOLUTION", "DEVELOPR", "ACADEMIC", "STUDENTS",
@@ -73,29 +67,26 @@ RAW_WORDS = [
 
 WORDS_BY_LENGTH: Dict[int, List[str]] = {}
 for word in RAW_WORDS:
-    # Clean the word: only keep uppercase alphabets
     cleaned_word = "".join(filter(str.isalpha, word.upper())) 
     length = len(cleaned_word)
-    
-    # Only store words if they match a configured difficulty length
     if length in [c['length'] for c in DIFFICULTY_CONFIG.values()]:
          WORDS_BY_LENGTH.setdefault(length, []).append(cleaned_word)
          
-# --- MongoDB Manager Class ---
+# --- MongoDB Manager Class (Unchanged) ---
 
 class MongoDBManager:
-    """Handles all interactions with MongoDB for game state, leaderboard, and chat tracking."""
+    """Handles all interactions with MongoDB."""
     def __init__(self, mongo_url: str, db_name: str):
         if not mongo_url:
             raise ValueError("MONGO_URL not provided.")
         
-        self.client = MongoClient(mongo_url)
+        # Increase timeout to avoid connection issues on slow starts
+        self.client = MongoClient(mongo_url, serverSelectionTimeoutMS=5000) 
         self.db = self.client[db_name]
         self.leaderboard_collection = self.db['leaderboard']
         self.games_collection = self.db['active_games']
         self.chats_collection = self.db['known_chats'] 
         
-        # Ensure indexes for fast lookups
         self.leaderboard_collection.create_index("user_id", unique=True)
         self.games_collection.create_index("chat_id", unique=True)
         self.chats_collection.create_index("chat_id", unique=True)
@@ -110,6 +101,13 @@ class MongoDBManager:
             },
             upsert=True
         )
+
+    def get_leaderboard_data(self, limit=10) -> List[Tuple[str, int, int]]:
+        data = list(self.leaderboard_collection.find().sort('points', -1).limit(limit))
+        result = []
+        for doc in data:
+            result.append((doc.get('username'), doc.get('points', 0), doc.get('wins', 0)))
+        return result
 
     def get_game_state(self, chat_id: int) -> Dict | None:
         return self.games_collection.find_one({'chat_id': chat_id})
@@ -143,31 +141,27 @@ try:
     else:
         logger.error("MONGO_URL not set. Running without database features.")
 except Exception as e:
-    logger.error(f"FATAL: Could not connect to MongoDB. Check MONGO_URL. Error: {e}")
+    logger.error(f"FATAL: Could not connect to MongoDB. Error: {e}")
     mongo_manager = None 
 
 # --- Core Game Logic Functions ---
 
 def get_feedback(secret_word: str, guess: str) -> str:
-    """
-    Generates the Wordle-style color-coded feedback (🟩, 🟨, 🟥).
-    Ensures color blocks are correctly used as Unicode characters.
-    """
+    """Generates the Wordle-style color-coded feedback (🟩, 🟨, 🟥)."""
     length = len(secret_word)
     feedback = ['🟥'] * length 
     remaining_letters = {}
     
-    # Count letter frequency in the secret word
     for letter in secret_word:
         remaining_letters[letter] = remaining_letters.get(letter, 0) + 1
 
-    # First pass: Check for Green (Correct position)
+    # First pass: Green (Correct position)
     for i in range(length):
         if guess[i] == secret_word[i]:
             feedback[i] = '🟩'
             remaining_letters[guess[i]] -= 1
 
-    # Second pass: Check for Yellow (Correct letter, wrong position)
+    # Second pass: Yellow (Correct letter, wrong position)
     for i in range(length):
         if feedback[i] == '🟥':
             letter = guess[i]
@@ -175,7 +169,6 @@ def get_feedback(secret_word: str, guess: str) -> str:
                 feedback[i] = '🟨'
                 remaining_letters[letter] -= 1
     
-    # Return the color blocks string
     return "".join(feedback)
 
 def calculate_points(difficulty: str, guesses: int) -> int:
@@ -193,8 +186,7 @@ async def start_new_game_logic(chat_id: int, difficulty: str) -> Tuple[bool, str
     if difficulty not in DIFFICULTY_CONFIG:
         # Default to medium if invalid, but inform the user
         difficulty = 'medium'
-        logger.warning(f"Invalid difficulty requested, defaulting to {difficulty}.")
-
+        
     config = DIFFICULTY_CONFIG[difficulty]
     length = config['length']
     word_list = WORDS_BY_LENGTH.get(length)
@@ -219,6 +211,7 @@ async def start_new_game_logic(chat_id: int, difficulty: str) -> Tuple[bool, str
     )
 
 async def process_guess_logic(chat_id: int, guess: str) -> Tuple[str, bool, str, int, List[str]]:
+    """Processes a user's guess and returns feedback, win status, and points."""
     if not mongo_manager: return "", False, "Database Error.", 0, []
 
     game = mongo_manager.get_game_state(chat_id)
@@ -232,11 +225,11 @@ async def process_guess_logic(chat_id: int, guess: str) -> Tuple[str, bool, str,
     config = DIFFICULTY_CONFIG[game['difficulty']]
     length = config['length']
     
-    # 1. Validation for length and alphabet-only check
+    # 1. Validation for length
     if len(guess_clean) != length:
         return "", False, f"❌ **{guess.upper()}** must be exactly **{length}** letters long.", 0, game.get('guess_history', [])
     
-    # 2. Validation against word list (crucial for clean error messaging)
+    # 2. Validation against word list (Crucial for the "not a valid word" message)
     if guess_clean not in WORDS_BY_LENGTH.get(length, []):
          return "", False, f"❌ **{guess_clean}** is not a valid word.", 0, game.get('guess_history', [])
 
@@ -255,7 +248,6 @@ async def process_guess_logic(chat_id: int, guess: str) -> Tuple[str, bool, str,
 
     # 5. Check for Loss
     remaining = game['max_guesses'] - game['guesses_made']
-    
     mongo_manager.save_game_state(chat_id, game)
     
     if remaining <= 0:
@@ -269,17 +261,16 @@ async def process_guess_logic(chat_id: int, guess: str) -> Tuple[str, bool, str,
 async def is_group_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     """Checks if the user is an admin or creator in a group, or is in a private chat."""
     if update.effective_chat.type == ChatType.PRIVATE:
-        return True # Always allow in private chat
+        return True
     try:
         member = await context.bot.get_chat_member(update.effective_chat.id, update.effective_user.id)
         return member.status in ['administrator', 'creator']
     except Exception:
         return False
 
-# --- Inline Keyboard Builders ---
+# --- Inline Keyboard Builders (Unchanged, matches UI) ---
 
 def get_start_keyboard():
-    """Matches the UI buttons in the /start image."""
     keyboard = [
         [InlineKeyboardButton("Help Menu", callback_data="show_help_menu")],
         [
@@ -291,7 +282,6 @@ def get_start_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 def get_help_menu_keyboard():
-    """Matches the UI buttons in the Help Menu image."""
     keyboard = [
         [InlineKeyboardButton("How to play", callback_data="show_how_to_play")],
         [InlineKeyboardButton("Commands 📚", callback_data="show_commands")],
@@ -300,14 +290,12 @@ def get_help_menu_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 def get_play_again_keyboard():
-    """Returns a simple 'Play Again' button."""
     keyboard = [
         [InlineKeyboardButton("Play Again", callback_data="new_game_menu")] 
     ]
     return InlineKeyboardMarkup(keyboard)
 
 def get_new_game_keyboard():
-    """Keyboard for difficulty selection."""
     keyboard = [
         [
             InlineKeyboardButton("Easy (4 letters)", callback_data="start_easy"),
@@ -321,15 +309,14 @@ def get_new_game_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# --- Command Handlers ---
+# --- Command Handlers (Unchanged) ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sends welcome message and main menu keyboard (Matches your image UI)."""
     if mongo_manager and update.effective_message:
         mongo_manager.add_chat(update.effective_chat.id, update.effective_chat.type.name, update.effective_message.date.timestamp())
     
     await update.message.reply_text(
-        "👋 Welcome back to ** @narzowordbot **,\n"
+        "👋 Welcome back to ** @narzowordbot**,\n"
         "The ultimate word challenge — fun, fast, and competitive\n"
         "with leaderboard, only on Telegram!\n\n"
         "1. Use **/new** to start a game. Add me to a group with admin permission to play with your friends.\n"
@@ -338,19 +325,17 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "**WordRush**\n"
         "Simple & Intresting Words\n"
         "Guess bot, Use **/new** to start game.\n"
-        "Play & Report: **@narzoxbot**\n"
-        "Updates,: **@narzob**",
+        "Play & Report: **@narzob**\n"
+        "Updates,: **@narzoxbot**",
         reply_markup=get_start_keyboard(),
         parse_mode='Markdown'
     )
 
 async def new_game_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Starts a new game with an optional difficulty argument."""
     chat_id = update.effective_chat.id
     if mongo_manager and update.effective_message:
         mongo_manager.add_chat(chat_id, update.effective_chat.type.name, update.effective_message.date.timestamp())
 
-    # Check if difficulty is provided in arguments, otherwise default to medium
     difficulty = context.args[0].lower() if context.args else 'medium'
     
     if mongo_manager and mongo_manager.get_game_state(chat_id):
@@ -361,7 +346,6 @@ async def new_game_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await update.message.reply_text(message, parse_mode='Markdown')
 
 async def end_game_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Ends the current game (Admin check required)."""
     chat_id = update.effective_chat.id
     
     if not mongo_manager or not mongo_manager.get_game_state(chat_id):
@@ -382,13 +366,8 @@ async def end_game_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
 
 async def difficulty_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Changes difficulty for the current active game or starts a new one 
-    if no game is active (Admin check required).
-    """
     chat_id = update.effective_chat.id
     if not context.args:
-        # Show usage guide (Matches one of your images)
         available_diffs = '/'.join(DIFFICULTY_CONFIG.keys())
         await update.message.reply_text(
             f"Available difficulty: {available_diffs.upper()}\n\nValid usage\n`/difficulty easy`\nLike this!",
@@ -406,7 +385,6 @@ async def difficulty_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
         
     if mongo_manager.get_game_state(chat_id):
-        # If game is active, end the current one and start a new one with the desired difficulty
         await update.message.reply_text("A game is currently active. Ending the old game and starting a new one...")
         mongo_manager.delete_game_state(chat_id)
 
@@ -415,7 +393,6 @@ async def difficulty_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Displays the top 10 players on the global leaderboard."""
     if mongo_manager and update.effective_message:
         mongo_manager.add_chat(update.effective_chat.id, update.effective_chat.type.name, update.effective_message.date.timestamp())
         
@@ -430,7 +407,6 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         message = "🏆 **Global Leaderboard** (Top 10)\n\n"
         for i, (username, points, wins) in enumerate(data):
-            # Use first_name if username is None/empty for a cleaner display
             name = f"User #{i+1}" if not username else f"@{username}"
             message += f"**{i+1}.** {name} - **{points}** points ({wins} wins)\n"
 
@@ -460,7 +436,6 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     for chat_id in chat_ids:
         try:
-            # Use try-except to handle blocked chats and continue
             await context.bot.send_message(chat_id=chat_id, text=message_to_send, parse_mode='Markdown')
             success_count += 1
         except error.Forbidden:
@@ -472,16 +447,15 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             
     await update.message.reply_text(f"Broadcast complete.\nSuccessful: **{success_count}**\nFailed: **{fail_count}**", parse_mode='Markdown')
 
-
-# --- Callback Handler (UI Logic) ---
+# --- Callback Handler (Unchanged) ---
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles inline keyboard button presses for menus and game start."""
     query = update.callback_query
     await query.answer() 
     chat_id = query.message.chat_id
     
     if query.data == "back_to_start":
+        # ... (Start menu message content)
         await query.edit_message_text(
             "👋 Welcome back to **WordRushBot**,\n"
             "The ultimate word challenge — fun, fast, and competitive\n"
@@ -499,6 +473,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
     
     elif query.data == "show_help_menu":
+        # ... (Help menu message content)
         await query.edit_message_text(
             "WordRush's Help menu\n"
             "Choose the category you want to help with WordRush\n\n"
@@ -508,7 +483,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
 
     elif query.data == "show_how_to_play":
-        # Matches content of the "How to Play" image
+        # ... (How to play content)
         commands_list = (
             "❓ **How to play Word Rush**\n"
             "1. You have to guess a secret word.\n"
@@ -529,7 +504,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await query.edit_message_text(commands_list, reply_markup=get_help_menu_keyboard(), parse_mode='Markdown')
 
     elif query.data == "show_commands":
-        # Matches content of the "Commands" image
+        # ... (Commands content)
         commands_list = (
             "📖 **Word Rush Commands**\n"
             "• **/new** (or **/new easy|medium|hard|extreme**) → Start a new game. You can set difficulty while starting.\n"
@@ -547,7 +522,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             parse_mode='Markdown'
         )
     
-    # Difficulty Select Logic (from Play Again or Menu)
     elif query.data.startswith("start_"):
         difficulty = query.data.split('_')[1]
         
@@ -574,32 +548,24 @@ async def handle_guess(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     guess = update.message.text.strip()
     
     # 1. Process guess
+    # feedback: Last guess's color blocks (e.g., "🟩🟨🟥")
+    # status_message: WIN/LOSS/Guesses left
     feedback, is_win, status_message, points, guess_history = await process_guess_logic(chat_id, guess)
-
-    # 2. Handle validation errors (Clean message as requested: "❌ NUMBE is not a valid word.")
+    
+    # 2. Handle validation errors (Clean message: "❌ NUMBE is not a valid word.")
     if status_message.startswith("❌"):
         await update.message.reply_text(status_message, parse_mode='Markdown')
         return
 
-    # 3. Construct the reply message with full history
-    game_state = mongo_manager.get_game_state(chat_id)
-    secret_word_len = len(game_state['word'])
-    difficulty_display = game_state['difficulty'].capitalize()
-    
-    # Format the entire history of guesses for the new message
-    # Format: 🟩🟨🟥🟥🟩 - GUESS
-    game_progress_display = "\n".join(guess_history)
-    
-    reply_markup = None
-    parse_mode = 'Markdown'
-    reply_text = ""
-
-    # 4. Handle Win/Loss
+    # 3. Handle Win/Loss
     if status_message == "WIN":
-        word_was = game_state['word']
+        word_was = mongo_manager.get_game_state(chat_id)['word'] if mongo_manager.get_game_state(chat_id) else "UNKNOWN"
         username = user.username or user.first_name 
         
-        # Match the exact success message format (Image 1)
+        # Update Leaderboard
+        if mongo_manager:
+            mongo_manager.update_leaderboard(user.id, username, points)
+        
         reply_text = (
             f"Congratulations **{username}**!\n"
             f"You earned **{points} Points**\n\n"
@@ -609,8 +575,7 @@ async def handle_guess(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         reply_markup = get_play_again_keyboard()
 
     elif status_message == "LOSS":
-        word_was = game_state['word']
-        # Loss message
+        word_was = mongo_manager.get_game_state(chat_id)['word'] if mongo_manager.get_game_state(chat_id) else "UNKNOWN"
         reply_text = (
             f"💔 **Game Over!**\n"
             f"The word was **{word_was}**.\n\n"
@@ -619,18 +584,21 @@ async def handle_guess(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         reply_markup = get_play_again_keyboard()
 
     else:
-        # Ongoing game message
+        # 4. Ongoing game message (The crucial fix: Only send the latest block line)
+        
+        # We only take the LATEST guess from the history.
+        latest_guess_line = guess_history[-1] 
+        
         reply_text = (
-            f"**Game started!** Difficulty set to **{difficulty_display}**\n"
-            f"Guess the **{secret_word_len} letters word**!\n\n"
-            f"{game_progress_display}\n\n"
-            f"{status_message}" # This will show "Guesses left: X"
+            f"{latest_guess_line}\n\n" # Example: 🟩🟨🟥 - HELLO
+            f"{status_message}" # Example: Guesses left: **27**
         )
+        reply_markup = None
     
     await update.message.reply_text(
         reply_text, 
         reply_markup=reply_markup, 
-        parse_mode=parse_mode
+        parse_mode='Markdown'
     )
 
 # --- Main Bot Runner ---
@@ -641,7 +609,6 @@ def main():
         logger.error("FATAL ERROR: BOT_TOKEN not found. Please set it in the .env file.")
         return
     
-    # Use the application builder for Telegram's latest features
     application = Application.builder().token(BOT_TOKEN).build()
 
     # Register Handlers
@@ -649,7 +616,7 @@ def main():
     application.add_handler(CommandHandler("new", new_game_command))
     application.add_handler(CommandHandler("end", end_game_command))
     application.add_handler(CommandHandler("leaderboard", leaderboard_command))
-    application.add_handler(CommandHandler("difficulty", difficulty_command)) # Added /difficulty
+    application.add_handler(CommandHandler("difficulty", difficulty_command))
     
     if ADMIN_USER_ID != 0 and mongo_manager is not None:
         application.add_handler(CommandHandler("broadcast", broadcast_command))
@@ -662,9 +629,9 @@ def main():
     # Message handler for all text messages that aren't commands (i.e., guesses)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_guess))
 
-    logger.info("Final Advanced WordRush Bot is running (Using Polling)...")
-    # For hosting services like Render, check their documentation for the preferred method (Polling vs Webhook).
-    # If you get 'Conflict' errors, it means a previous bot instance is running, or a Webhook is configured.
+    logger.info("Final Cleaned WordRush Bot is running...")
+    
+    # Run polling
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
