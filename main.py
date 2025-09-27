@@ -59,8 +59,7 @@ for word in RAW_WORDS:
     if length in [c['length'] for c in DIFFICULTY_CONFIG.values()]:
          WORDS_BY_LENGTH.setdefault(length, []).append(cleaned_word)
          
-# --- MongoDB Manager Class (Unchanged) ---
-# (MongoDBManager class definition remains the same)
+# --- MongoDB Manager Class ---
 
 class MongoDBManager:
     """Handles all interactions with MongoDB."""
@@ -144,7 +143,7 @@ def get_feedback(secret_word: str, guess: str) -> str:
 
     # First pass: Green (Correct position)
     for i in range(length):
-        if i < len(guess) and guess[i] == secret_word[i]: # Check for bounds
+        if i < len(guess) and guess[i] == secret_word[i]:
             feedback[i] = '🟩'
             remaining_letters[guess[i]] -= 1
 
@@ -216,37 +215,38 @@ async def process_guess_logic(chat_id: int, guess: str) -> Tuple[str, bool, str,
         # User message for incorrect length
         return "", False, f"❌ **{guess.upper()}** must be exactly **{length}** letters long.", 0, game.get('guess_history', [])
     
-    # 2. **NO VALID WORD CHECK (ALL WORDS ALLOWED)**
-    # We skip the check against WORDS_BY_LENGTH, allowing any word of the correct length.
-
     game['guesses_made'] += 1
     
-    # 3. Generate Feedback and update history
+    # 2. Generate Feedback and update history
     feedback_str = get_feedback(secret_word, guess_clean)
-    game['guess_history'].append(f"{feedback_str} - {guess_clean}")
+    # Storing in the required format: Blocks - WORD
+    game['guess_history'].append(f"{feedback_str} - **{guess_clean}**") 
     
-    # 4. Check for Win
+    # 3. Check for Win
     if guess_clean == secret_word:
         guesses = game['guesses_made']
         points = calculate_points(game['difficulty'], guesses)
+        # Store the word before deleting the state for the win/loss message
+        game_word_for_loss = game['word']
         mongo_manager.delete_game_state(chat_id) 
         return feedback_str, True, "WIN", points, game['guess_history']
 
-    # 5. Check for Loss
+    # 4. Check for Loss
     remaining = game['max_guesses'] - game['guesses_made']
-    mongo_manager.save_game_state(chat_id, game)
     
     if remaining <= 0:
+        game_word_for_loss = game['word']
         mongo_manager.delete_game_state(chat_id) 
-        return feedback_str, False, "LOSS", 0, game['guess_history']
+        # For loss, we return the secret word as status
+        return feedback_str, False, f"LOSS_WORD:{game_word_for_loss}", 0, game['guess_history']
     
     # Status for ongoing game
+    mongo_manager.save_game_state(chat_id, game)
     return feedback_str, False, f"Guesses left: **{remaining}**", 0, game['guess_history']
 
-# --- Telegram UI & Handler Functions (Unchanged) ---
-# (is_group_admin, get_start_keyboard, get_help_menu_keyboard, etc. remain the same)
+# --- Telegram UI & Handler Functions (All helper functions remain the same) ---
+
 async def is_group_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Checks if the user is an admin or creator in a group, or is in a private chat."""
     if update.effective_chat.type == ChatType.PRIVATE:
         return True
     try:
@@ -294,7 +294,8 @@ def get_new_game_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# --- Command Handlers (Unchanged) ---
+# --- Command Handlers (All command handlers remain the same) ---
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if mongo_manager and update.effective_message:
         mongo_manager.add_chat(update.effective_chat.id, update.effective_chat.type.name, update.effective_message.date.timestamp())
@@ -309,8 +310,8 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "**WordRush**\n"
         "Simple & Intresting Words\n"
         "Guess bot, Use **/new** to start game.\n"
-        "Play & Report: **@narzob**\n"
-        "Updates,: **@narzoxbot**",
+        "Play & Report: **@narzoxbot**\n"
+        "Updates,: **@narzob**",
         reply_markup=get_start_keyboard(),
         parse_mode='Markdown'
     )
@@ -431,7 +432,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             
     await update.message.reply_text(f"Broadcast complete.\nSuccessful: **{success_count}**\nFailed: **{fail_count}**", parse_mode='Markdown')
 
-# --- Callback Handler (Unchanged) ---
+# --- Callback Handler (All callback handlers remain the same) ---
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer() 
@@ -514,73 +515,78 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         else:
             await query.edit_message_text(f"Game start failed: {message}", parse_mode='Markdown')
 
-# --- Guess Handler (The Final Fix) ---
+# --- Updated Guess Handler ---
 
 async def handle_guess(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     user = update.effective_user
     
-    if not mongo_manager or not mongo_manager.get_game_state(chat_id):
-        # Ignore message if no game is running
+    if not mongo_manager:
+        await update.message.reply_text("Database Error. Cannot process guess.")
+        return
+
+    game_state = mongo_manager.get_game_state(chat_id)
+    if not game_state:
+        # If no game is running, silently ignore or prompt to start
+        await update.message.reply_text("No active game. Use **/new** to start a game.", parse_mode='Markdown')
         return
 
     guess = update.message.text.strip()
     
     # Process guess
-    # feedback: Last guess's color blocks (e.g., "🟩🟨🟥")
-    # status_message: WIN/LOSS/Guesses left
     feedback, is_win, status_message, points, guess_history = await process_guess_logic(chat_id, guess)
     
     # 1. Handle validation errors (Incorrect length)
     if status_message.startswith("❌"):
-        # The logic is updated: "❌ WORD is not a valid word." is now only shown for incorrect length.
-        # This matches the user's requirement to allow ALL words of the correct length.
         await update.message.reply_text(status_message, parse_mode='Markdown')
         return
 
     reply_markup = None
     
-    # 2. Handle Win/Loss
-    if status_message == "WIN":
-        # We need to get the word *before* deleting it, but the logic above already deleted it.
-        # A safer way is to save the word before the delete in process_guess_logic or use the deleted state's info
-        # For simplicity here, we assume the word can be retrieved if needed, but the current state is sufficient
-        game_state = mongo_manager.get_game_state(chat_id) # This will be None
-        word_was = guess_history[-1].split(' - ')[-1] # The winning guess is the last guess
+    # 2. Construct the full history display
+    # Format: 🟩🟨🟥 - **WORD** (One line per guess)
+    game_history_display = "\n".join(guess_history)
+    
+    # 3. Handle Win/Loss/Ongoing
+    
+    if is_win:
+        word_was = guess_history[-1].split(' - ')[-1].replace('**', '') # Get the winning word from history
         username = user.username or user.first_name 
         
-        # Update Leaderboard
-        if mongo_manager:
-            mongo_manager.update_leaderboard(user.id, username, points)
+        mongo_manager.update_leaderboard(user.id, username, points)
         
+        # Win message includes the final board
         reply_text = (
+            f"**🏆 Game Won! 🏆**\n"
             f"Congratulations **{username}**!\n"
             f"You earned **{points} Points**\n\n"
-            f"You guessed the correct word!\n"
+            f"{game_history_display}\n\n" # Display the final completed board
             f"Word was **{word_was}**!"
         )
         reply_markup = get_play_again_keyboard()
 
-    elif status_message == "LOSS":
-        word_was = game_state.get('word', 'UNKNOWN') # Get the word from the state before it was deleted
+    elif status_message.startswith("LOSS_WORD:"):
+        # Loss message (Maximum guesses reached)
+        word_was = status_message.split(":")[1]
+        
+        # Loss message includes the final failed board
         reply_text = (
             f"💔 **Game Over!**\n"
-            f"The word was **{word_was}**.\n\n"
-            f"Try again!"
+            f"You failed to guess the word in time.\n\n"
+            f"{game_history_display}\n\n" # Display the final failed board
+            f"The word was **{word_was}**."
         )
         reply_markup = get_play_again_keyboard()
 
     else:
-        # 3. Ongoing game message (Only send the latest block line + status)
-        
-        # Format: 🟩🟨🟥 - HELLO
-        latest_guess_line = guess_history[-1] 
+        # 4. Ongoing game message (Show full history + status)
         
         reply_text = (
-            f"{latest_guess_line}\n\n" # Displays: 🟩🟨🟥 - GUESS
+            f"**Word Rush Challenge**\n"
+            f"Guesses: {len(guess_history)}/{game_state['max_guesses']}\n\n"
+            f"{game_history_display}\n\n" # Displays the FULL history (Boxes - word)
             f"**{status_message}**" # Displays: Guesses left: **27**
         )
-        reply_markup = None
     
     await update.message.reply_text(
         reply_text, 
@@ -588,7 +594,7 @@ async def handle_guess(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         parse_mode='Markdown'
     )
 
-# --- Main Bot Runner (Unchanged) ---
+# --- Main Bot Runner ---
 
 def main():
     """Start the bot."""
@@ -616,7 +622,7 @@ def main():
     # Message handler for all text messages that aren't commands (i.e., guesses)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_guess))
 
-    logger.info("Final Cleaned WordRush Bot is running (All words allowed)...")
+    logger.info("Final Cleaned WordRush Bot is running (Full History Display)...")
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
