@@ -57,7 +57,7 @@ for word in RAW_WORDS:
     if length <= 8 and length in [c['length'] for c in DIFFICULTY_CONFIG.values()]: 
          WORDS_BY_LENGTH.setdefault(length, []).append(cleaned_word)
          
-# --- MongoDB Manager Class (Modified for Daily/Weekly/Monthly) ---
+# --- MongoDB Manager Class (Unchanged from your last version) ---
 class MongoDBManager:
     """Handles all interactions with MongoDB, now with time-based leaderboards."""
     def __init__(self, mongo_url: str, db_name: str):
@@ -147,7 +147,6 @@ class MongoDBManager:
         
         result = []
         for doc in data:
-            # We fetch points_global if the specific period points are not present (for old data)
             points = doc.get(points_key, 0)
             wins = doc.get(wins_key, 0)
             
@@ -155,7 +154,7 @@ class MongoDBManager:
             if points > 0 or period == 'global':
                  result.append((doc.get('username'), points, wins))
                  
-        # Re-sort to ensure integrity, especially if some users had a period-specific key but zero points
+        # Re-sort to ensure integrity
         result.sort(key=lambda x: x[1], reverse=True)
         return result[:limit]
 
@@ -187,7 +186,6 @@ class MongoDBManager:
 mongo_manager = None
 try:
     if MONGO_URL:
-        # Check if the existing mongo_manager is not None and if it's connected (optional optimization)
         mongo_manager = MongoDBManager(MONGO_URL, MONGO_DB_NAME)
     else:
         logger.error("❌ MONGO_URL not set. Running without database features.")
@@ -195,7 +193,8 @@ except Exception as e:
     logger.error(f"❌ FATAL: Could not connect to MongoDB. Error: {e}")
     mongo_manager = None 
 
-# --- Core Game Logic Functions (Unchanged) ---
+# --- Core Game Logic Functions ---
+# (get_feedback and calculate_points remain unchanged)
 
 def get_feedback(secret_word: str, guess: str) -> str:
     """Generates the Wordle-style color-coded feedback (🟩, 🟨, 🟥)."""
@@ -252,7 +251,8 @@ async def start_new_game_logic(chat_id: int, difficulty: str) -> Tuple[bool, str
         'difficulty': difficulty,
         'guesses_made': 0,
         'max_guesses': config['max_guesses'],
-        'guess_history': [] 
+        'guess_history': [],
+        'guessed_words': [] # NEW: To track unique words guessed
     }
     mongo_manager.save_game_state(chat_id, initial_state)
     
@@ -273,7 +273,7 @@ async def process_guess_logic(chat_id: int, guess: str) -> Tuple[str, bool, str,
         return "", False, "No active game.", 0, []
     
     secret_word = game['word']
-    # Guess is already cleaned by the MessageHandler filters, but ensure it's uppercase
+    # Guess is already cleaned/uppercase by the MessageHandler filters
     guess_clean = guess.upper()
 
     config = DIFFICULTY_CONFIG[game['difficulty']]
@@ -284,14 +284,21 @@ async def process_guess_logic(chat_id: int, guess: str) -> Tuple[str, bool, str,
         # User message for incorrect length
         return "", False, f"❌ **`{guess.upper()}`** *must be exactly* **{length}** *letters long*.", 0, game.get('guess_history', [])
     
-    game['guesses_made'] += 1
+    # 2. NEW: Check if word has already been guessed
+    if guess_clean in game.get('guessed_words', []):
+        # User message for duplicate guess
+        return "", False, f"❌ **`{guess.upper()}`** *already guessed! Try a new word*.", 0, game.get('guess_history', [])
+
     
-    # 2. Generate Feedback and update history
+    game['guesses_made'] += 1
+    game['guessed_words'].append(guess_clean) # Add the valid guess to the list
+    
+    # 3. Generate Feedback and update history
     feedback_str = get_feedback(secret_word, guess_clean)
     # Storing in the required format: Blocks - WORD
     game['guess_history'].append(f" `{feedback_str}` - **{guess_clean}**") 
     
-    # 3. Check for Win
+    # 4. Check for Win
     if guess_clean == secret_word:
         guesses = game['guesses_made']
         points = calculate_points(game['difficulty'], guesses)
@@ -299,7 +306,7 @@ async def process_guess_logic(chat_id: int, guess: str) -> Tuple[str, bool, str,
         mongo_manager.delete_game_state(chat_id) 
         return feedback_str, True, "WIN", points, game['guess_history']
 
-    # 4. Check for Loss
+    # 5. Check for Loss
     remaining = game['max_guesses'] - game['guesses_made']
     
     if remaining <= 0:
@@ -312,7 +319,7 @@ async def process_guess_logic(chat_id: int, guess: str) -> Tuple[str, bool, str,
     mongo_manager.save_game_state(chat_id, game)
     return feedback_str, False, f"Guesses left: **{remaining}**", 0, game['guess_history']
 
-# --- Telegram UI & Handler Functions ---
+# --- Telegram UI & Handler Functions (All Unchanged) ---
 
 async def is_group_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     # Any user is considered "admin" in a private chat for commands like /end and /difficulty
@@ -324,7 +331,7 @@ async def is_group_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception:
         return False
 
-# --- Keyboard Functions (Updated) ---
+# --- Keyboard Functions (Unchanged) ---
 
 def get_start_keyboard():
     keyboard = [
@@ -341,7 +348,7 @@ def get_help_menu_keyboard():
     keyboard = [
         [InlineKeyboardButton("📝 How to Play", callback_data="show_how_to_play")],
         [InlineKeyboardButton("📘 Commands List", callback_data="show_commands")],
-        [InlineKeyboardButton("🏆 Leaderboard", callback_data="show_leaderboard_menu")], # CHANGED: Menu for Daily/Weekly/Global
+        [InlineKeyboardButton("🏆 Leaderboard", callback_data="show_leaderboard_menu")],
         [InlineKeyboardButton("🏠 Back to Start", callback_data="back_to_start")]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -366,7 +373,7 @@ def get_new_game_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-def get_leaderboard_menu_keyboard(): # NEW FUNCTION
+def get_leaderboard_menu_keyboard(): 
     keyboard = [
         [
             InlineKeyboardButton("☀️ Daily", callback_data="show_leaderboard_daily"),
@@ -380,7 +387,7 @@ def get_leaderboard_menu_keyboard(): # NEW FUNCTION
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# --- Leaderboard Utility Function (Refactored) ---
+# --- Leaderboard Utility Function (Unchanged) ---
 
 async def display_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE, period: str):
     """Fetches and displays the leaderboard for the given period."""
@@ -399,7 +406,7 @@ async def display_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE
         message += "-------------------------------------\n"
         for i, (username, points, wins) in enumerate(data):
             rank_style = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else f"**{i+1}.**"
-            name = f"@{username}" if username else f"User ID `{data[i][0]}`" # Use data[i][0] as fallback
+            name = f"@{username}" if username else f"User ID `{data[i][0]}`"
             message += f"{rank_style} {name} - **`{points}`** pts ({wins} wins)\n"
             
     # Send as a new message if it's a command, or edit if it's a callback
@@ -408,7 +415,7 @@ async def display_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         await update.message.reply_text(message, reply_markup=get_leaderboard_menu_keyboard(), parse_mode='Markdown')
 
-# --- Command Handlers (Modified /leaderboard) ---
+# --- Command Handlers (All Unchanged) ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if mongo_manager and update.effective_message:
@@ -571,7 +578,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             
     await update.message.reply_text(f"✅ **Broadcast Complete**\nSuccessful: **{success_count}**\nFailed: **{fail_count}**", parse_mode='Markdown')
 
-# --- Callback Handler (Modified for Leaderboard Menu) ---
+# --- Callback Handler (Unchanged) ---
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer() 
@@ -625,7 +632,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         )
         await query.edit_message_text(commands_list, reply_markup=get_help_menu_keyboard(), parse_mode='Markdown')
         
-    elif query.data == "show_leaderboard_menu": # NEW
+    elif query.data == "show_leaderboard_menu":
         await query.edit_message_text(
             "🏆 **Leaderboard Selection**\n"
             "-------------------------------------\n"
@@ -634,7 +641,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             parse_mode='Markdown'
         )
         
-    elif query.data.startswith("show_leaderboard_"): # NEW HANDLER FOR PERIODS
+    elif query.data.startswith("show_leaderboard_"):
         period = query.data.split('_')[-1]
         await display_leaderboard(update, context, period)
 
@@ -659,7 +666,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         else:
             await query.edit_message_text(f"❌ *Game start failed*: {message}", parse_mode='Markdown')
 
-# --- Updated Guess Handler (Unchanged, as points calculation is done in logic) ---
+# --- Updated Guess Handler (Handles the new error message) ---
 
 async def handle_guess(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
@@ -679,7 +686,7 @@ async def handle_guess(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     # Process guess
     feedback, is_win, status_message, points, guess_history = await process_guess_logic(chat_id, guess)
     
-    # 1. Handle validation errors (Incorrect length for current game)
+    # 1. Handle validation errors (Incorrect length OR Duplicate guess)
     if status_message.startswith("❌"):
         await update.message.reply_text(status_message, parse_mode='Markdown')
         return
@@ -754,7 +761,7 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("new", new_game_command))
     application.add_handler(CommandHandler("end", end_game_command))
-    application.add_handler(CommandHandler("leaderboard", leaderboard_command)) # MODIFIED
+    application.add_handler(CommandHandler("leaderboard", leaderboard_command))
     application.add_handler(CommandHandler("difficulty", difficulty_command)) 
     application.add_handler(CommandHandler("status", status_command)) 
     
@@ -774,7 +781,7 @@ def main():
         )
     )
 
-    logger.info("🚀 WordRush Bot is running (Daily/Weekly Leaderboards Ready)...")
+    logger.info("🚀 WordRush Bot is running (Guess Uniqueness & Leaderboards Ready)...")
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
