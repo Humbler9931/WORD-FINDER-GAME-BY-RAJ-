@@ -2,6 +2,7 @@ import os
 import random
 import re
 import logging
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, error
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
@@ -56,14 +57,13 @@ for word in RAW_WORDS:
     if length <= 8 and length in [c['length'] for c in DIFFICULTY_CONFIG.values()]: 
          WORDS_BY_LENGTH.setdefault(length, []).append(cleaned_word)
          
-# --- MongoDB Manager Class (Unchanged) ---
+# --- MongoDB Manager Class (Modified for Daily/Weekly/Monthly) ---
 class MongoDBManager:
-    """Handles all interactions with MongoDB."""
+    """Handles all interactions with MongoDB, now with time-based leaderboards."""
     def __init__(self, mongo_url: str, db_name: str):
         if not mongo_url:
             raise ValueError("MONGO_URL not provided.")
         
-        # Increased timeout slightly for better robustness
         self.client = MongoClient(mongo_url, serverSelectionTimeoutMS=10000) 
         self.db = self.client[db_name]
         self.leaderboard_collection = self.db['leaderboard']
@@ -75,22 +75,89 @@ class MongoDBManager:
         self.chats_collection.create_index("chat_id", unique=True)
         logger.info("✅ MongoDB connection and indexing successful.")
 
+    def _get_reset_check_query(self, user_id: int, period: str) -> dict:
+        """Determines if the points/wins for a period need a reset."""
+        now = datetime.now(timezone.utc)
+        
+        if period == 'daily':
+            reset_after = now - timedelta(days=1)
+        elif period == 'weekly':
+            reset_after = now - timedelta(weeks=1)
+        elif period == 'monthly':
+            reset_after = now - timedelta(days=30)
+        else: # Global
+            return {'$set': {}}
+
+        # $lt checks if the last win was BEFORE the reset threshold
+        return {
+            '$inc': {f'points_{period}': 0, f'wins_{period}': 0}, # Dummy $inc to allow $set
+            '$set': {
+                f'points_{period}': 0, 
+                f'wins_{period}': 0,
+            }
+        }, {f'last_win_date_{period}': {'$lt': reset_after}}
+
+
     def update_leaderboard(self, user_id: int, username: str, points_to_add: int):
+        now = datetime.now(timezone.utc)
+        update_global = {
+            '$inc': {'points_global': points_to_add, 'wins_global': 1},
+            '$set': {'username': username}
+        }
+        
+        # 1. Update Global stats
         self.leaderboard_collection.update_one(
             {'user_id': user_id},
-            {
-                '$inc': {'points': points_to_add, 'wins': 1},
-                '$set': {'username': username}
-            },
+            update_global,
             upsert=True
         )
+        
+        # 2. Update Time-based stats
+        periods = ['daily', 'weekly', 'monthly']
+        for period in periods:
+            update_op, reset_query = self._get_reset_check_query(user_id, period)
+            
+            # 2a. Check if reset is needed and perform reset if true
+            # We use $inc: 0 and $set to conditionally set the points/wins to 0 
+            # if the last win date is too old.
+            
+            reset_result = self.leaderboard_collection.update_one(
+                {'user_id': user_id, f'last_win_date_{period}': {'$lt': now - timedelta(days=1) if period == 'daily' else now - timedelta(weeks=1) if period == 'weekly' else now - timedelta(days=30)}},
+                {'$set': {f'points_{period}': 0, f'wins_{period}': 0}}
+            )
 
-    def get_leaderboard_data(self, limit=10) -> List[Tuple[str, int, int]]:
-        data = list(self.leaderboard_collection.find().sort('points', -1).limit(limit))
+            # 2b. Now, increment the period-specific points/wins and update the win date
+            self.leaderboard_collection.update_one(
+                {'user_id': user_id},
+                {
+                    '$inc': {f'points_{period}': points_to_add, f'wins_{period}': 1},
+                    '$set': {f'last_win_date_{period}': now}
+                },
+                upsert=True
+            )
+
+
+    def get_leaderboard_data(self, period: str, limit=10) -> List[Tuple[str, int, int]]:
+        """Retrieves leaderboard data for a specific period (daily, weekly, monthly, global)."""
+        points_key = f'points_{period}'
+        wins_key = f'wins_{period}'
+        
+        # Query: Find all entries, sort by points for the given period
+        data = list(self.leaderboard_collection.find().sort(points_key, -1).limit(limit))
+        
         result = []
         for doc in data:
-            result.append((doc.get('username'), doc.get('points', 0), doc.get('wins', 0)))
-        return result
+            # We fetch points_global if the specific period points are not present (for old data)
+            points = doc.get(points_key, 0)
+            wins = doc.get(wins_key, 0)
+            
+            # Ensure we only show users who have actually played in this period (points > 0)
+            if points > 0 or period == 'global':
+                 result.append((doc.get('username'), points, wins))
+                 
+        # Re-sort to ensure integrity, especially if some users had a period-specific key but zero points
+        result.sort(key=lambda x: x[1], reverse=True)
+        return result[:limit]
 
     def get_game_state(self, chat_id: int) -> Dict | None:
         return self.games_collection.find_one({'chat_id': chat_id})
@@ -120,6 +187,7 @@ class MongoDBManager:
 mongo_manager = None
 try:
     if MONGO_URL:
+        # Check if the existing mongo_manager is not None and if it's connected (optional optimization)
         mongo_manager = MongoDBManager(MONGO_URL, MONGO_DB_NAME)
     else:
         logger.error("❌ MONGO_URL not set. Running without database features.")
@@ -127,7 +195,7 @@ except Exception as e:
     logger.error(f"❌ FATAL: Could not connect to MongoDB. Error: {e}")
     mongo_manager = None 
 
-# --- Core Game Logic Functions ---
+# --- Core Game Logic Functions (Unchanged) ---
 
 def get_feedback(secret_word: str, guess: str) -> str:
     """Generates the Wordle-style color-coded feedback (🟩, 🟨, 🟥)."""
@@ -244,7 +312,7 @@ async def process_guess_logic(chat_id: int, guess: str) -> Tuple[str, bool, str,
     mongo_manager.save_game_state(chat_id, game)
     return feedback_str, False, f"Guesses left: **{remaining}**", 0, game['guess_history']
 
-# --- Telegram UI & Handler Functions (Admin check updated for DM support) ---
+# --- Telegram UI & Handler Functions ---
 
 async def is_group_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     # Any user is considered "admin" in a private chat for commands like /end and /difficulty
@@ -256,7 +324,7 @@ async def is_group_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception:
         return False
 
-# --- Keyboard Functions (Updated with better emojis) ---
+# --- Keyboard Functions (Updated) ---
 
 def get_start_keyboard():
     keyboard = [
@@ -273,7 +341,7 @@ def get_help_menu_keyboard():
     keyboard = [
         [InlineKeyboardButton("📝 How to Play", callback_data="show_how_to_play")],
         [InlineKeyboardButton("📘 Commands List", callback_data="show_commands")],
-        [InlineKeyboardButton("🏆 Leaderboard", callback_data="show_leaderboard_cb")], # New Callback
+        [InlineKeyboardButton("🏆 Leaderboard", callback_data="show_leaderboard_menu")], # CHANGED: Menu for Daily/Weekly/Global
         [InlineKeyboardButton("🏠 Back to Start", callback_data="back_to_start")]
     ]
     return InlineKeyboardMarkup(keyboard)
@@ -298,8 +366,49 @@ def get_new_game_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
+def get_leaderboard_menu_keyboard(): # NEW FUNCTION
+    keyboard = [
+        [
+            InlineKeyboardButton("☀️ Daily", callback_data="show_leaderboard_daily"),
+            InlineKeyboardButton("📅 Weekly", callback_data="show_leaderboard_weekly"),
+        ],
+        [
+            InlineKeyboardButton("🗓️ Monthly", callback_data="show_leaderboard_monthly"),
+            InlineKeyboardButton("🌎 Global", callback_data="show_leaderboard_global"),
+        ],
+        [InlineKeyboardButton("🔙 Back to Help", callback_data="show_help_menu")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
-# --- Command Handlers ---
+# --- Leaderboard Utility Function (Refactored) ---
+
+async def display_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE, period: str):
+    """Fetches and displays the leaderboard for the given period."""
+    if not mongo_manager:
+        await (update.callback_query.edit_message_text if update.callback_query else update.message.reply_text)("❌ *Database Error*. Cannot fetch leaderboard.")
+        return
+
+    data = mongo_manager.get_leaderboard_data(period=period, limit=10)
+    
+    title = period.capitalize() if period != 'global' else 'Global'
+    
+    if not data:
+        message = f"🏆 **{title} Leaderboard**\n\n*No scores recorded for this period yet.*"
+    else:
+        message = f"🏆 **{title} Leaderboard** (Top 10)\n"
+        message += "-------------------------------------\n"
+        for i, (username, points, wins) in enumerate(data):
+            rank_style = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else f"**{i+1}.**"
+            name = f"@{username}" if username else f"User ID `{data[i][0]}`" # Use data[i][0] as fallback
+            message += f"{rank_style} {name} - **`{points}`** pts ({wins} wins)\n"
+            
+    # Send as a new message if it's a command, or edit if it's a callback
+    if update.callback_query:
+        await update.callback_query.edit_message_text(message, reply_markup=get_leaderboard_menu_keyboard(), parse_mode='Markdown')
+    else:
+        await update.message.reply_text(message, reply_markup=get_leaderboard_menu_keyboard(), parse_mode='Markdown')
+
+# --- Command Handlers (Modified /leaderboard) ---
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if mongo_manager and update.effective_message:
@@ -388,27 +497,19 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text(reply_text, parse_mode='Markdown')
 
 async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Shows the leaderboard menu or the global leaderboard directly."""
     if mongo_manager and update.effective_message:
         mongo_manager.add_chat(update.effective_chat.id, update.effective_chat.type.name, update.effective_message.date.timestamp())
-        
-    if not mongo_manager:
-        await update.message.reply_text("❌ *Database Error*. Cannot fetch leaderboard.")
+
+    # If arguments are provided (e.g., /leaderboard daily), show that specific one
+    if context.args and context.args[0].lower() in ['daily', 'weekly', 'monthly', 'global']:
+        period = context.args[0].lower()
+        await display_leaderboard(update, context, period)
         return
 
-    data = mongo_manager.get_leaderboard_data(limit=10)
-    
-    if not data:
-        message = "🏆 **Global Leaderboard**\n\n*No scores recorded yet. Be the first to start a game!*"
-    else:
-        message = "🏆 **Global Leaderboard** (Top 10)\n"
-        message += "-------------------------------------\n"
-        for i, (username, points, wins) in enumerate(data):
-            # Better rank styling
-            rank_style = "🥇" if i == 0 else "🥈" if i == 1 else "🥉" if i == 2 else f"**{i+1}.**"
-            name = f"@{username}" if username else f"User `{update.effective_user.id}`"
-            message += f"{rank_style} {name} - **`{points}`** pts ({wins} wins)\n"
-
-    await update.message.reply_text(message, parse_mode='Markdown')
+    # Otherwise, show the leaderboard menu
+    message = "🏆 **Global Leaderboard**\n\n*Choose a period below to view the rankings!*"
+    await update.message.reply_text(message, reply_markup=get_leaderboard_menu_keyboard(), parse_mode='Markdown')
 
 async def difficulty_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Shows available difficulty levels and their settings."""
@@ -470,7 +571,7 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             
     await update.message.reply_text(f"✅ **Broadcast Complete**\nSuccessful: **{success_count}**\nFailed: **{fail_count}**", parse_mode='Markdown')
 
-# --- Callback Handler (Added leaderboard callback) ---
+# --- Callback Handler (Modified for Leaderboard Menu) ---
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer() 
@@ -498,7 +599,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             reply_markup=get_help_menu_keyboard(),
             parse_mode='Markdown'
         )
-    # ... other help menu callbacks (show_how_to_play, show_commands) ...
+
     elif query.data == "show_how_to_play":
         commands_list = (
             "🤔 **How to Play Word Rush** ❓\n"
@@ -518,20 +619,24 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             "-------------------------------------\n"
             "• **/new** [difficulty] → *Start a game*.\n"
             "• **/status** → *Show current game status and history* (New Feature!).\n"
-            "• **/leaderboard** → *Show global rankings*.\n"
+            "• **/leaderboard** [period] → *Show global/daily/weekly/monthly rankings*.\n"
             "• **/end** → *End current game* (Admin Only / DM).\n"
             "• **/difficulty** → *Show difficulty settings* (Admin Only / DM).\n"
         )
         await query.edit_message_text(commands_list, reply_markup=get_help_menu_keyboard(), parse_mode='Markdown')
         
-    elif query.data == "show_leaderboard_cb":
-        # Calls the leaderboard logic via callback
-        # Fake update object for leaderboard command
-        leaderboard_update = Update(update_id=0, message=query.message) 
-        await leaderboard_command(leaderboard_update, context) 
-        # Re-edit the original message with the help menu keyboard to prevent the leaderboard from replacing it.
-        # This requires a separate message. Or just replace the current message temporarily.
-        await query.edit_message_reply_markup(reply_markup=get_help_menu_keyboard())
+    elif query.data == "show_leaderboard_menu": # NEW
+        await query.edit_message_text(
+            "🏆 **Leaderboard Selection**\n"
+            "-------------------------------------\n"
+            "*Select the ranking period you wish to view.*",
+            reply_markup=get_leaderboard_menu_keyboard(),
+            parse_mode='Markdown'
+        )
+        
+    elif query.data.startswith("show_leaderboard_"): # NEW HANDLER FOR PERIODS
+        period = query.data.split('_')[-1]
+        await display_leaderboard(update, context, period)
 
     elif query.data == "new_game_menu":
         await query.edit_message_text(
@@ -554,29 +659,23 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         else:
             await query.edit_message_text(f"❌ *Game start failed*: {message}", parse_mode='Markdown')
 
-# --- Updated Guess Handler (Uses filters.Regex for strict letter checking) ---
+# --- Updated Guess Handler (Unchanged, as points calculation is done in logic) ---
 
 async def handle_guess(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     user = update.effective_user
     guess = update.message.text.strip()
     
-    # Advanced Log: See who is guessing
     username = user.username or user.first_name
     logger.info(f"Guess received in chat {chat_id} from {username}: {guess}")
 
     if not mongo_manager:
-        # DB Error - don't respond to guesses to prevent spam
         return
 
     game_state = mongo_manager.get_game_state(chat_id)
     if not game_state:
-        # Game not active - DO NOT RESPOND as requested
         return 
 
-    # Since MessageHandler is now using filters.Regex('[a-zA-Z]{1,8}'), the guess
-    # should be clean (only letters, 1 to 8 length). We pass it directly.
-    
     # Process guess
     feedback, is_win, status_message, points, guess_history = await process_guess_logic(chat_id, guess)
     
@@ -595,7 +694,8 @@ async def handle_guess(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if is_win:
         word_was = guess_history[-1].split(' - ')[-1].replace('**', '').strip() 
         
-        mongo_manager.update_leaderboard(user.id, username, points)
+        # This function now updates global, daily, weekly, and monthly scores
+        mongo_manager.update_leaderboard(user.id, username, points) 
         
         reply_text = (
             f"**🏆 GAME WON! 🥳**\n"
@@ -654,8 +754,8 @@ def main():
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("new", new_game_command))
     application.add_handler(CommandHandler("end", end_game_command))
-    application.add_handler(CommandHandler("leaderboard", leaderboard_command))
-    application.add_handler(CommandHandler("difficulty", difficulty_command)) # FIXED: Now points to the defined function
+    application.add_handler(CommandHandler("leaderboard", leaderboard_command)) # MODIFIED
+    application.add_handler(CommandHandler("difficulty", difficulty_command)) 
     application.add_handler(CommandHandler("status", status_command)) 
     
     if ADMIN_USER_ID != 0 and mongo_manager is not None:
@@ -674,7 +774,7 @@ def main():
         )
     )
 
-    logger.info("🚀 WordRush Bot is running (Advanced, Stylish, DM-Ready)...")
+    logger.info("🚀 WordRush Bot is running (Daily/Weekly Leaderboards Ready)...")
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
